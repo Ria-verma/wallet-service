@@ -18,6 +18,23 @@ func NewHealthHandler(db Pinger) *HealthHandler {
 	return &HealthHandler{db: db}
 }
 
+// Index gives visitors of the bare domain a map of the API instead of a 404.
+func (h *HealthHandler) Index(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"service": "wallet-service",
+		"docs":    "https://github.com/Ria-verma/wallet-service",
+		"endpoints": []string{
+			"POST /auth/signup {username, password}",
+			"POST /auth/login {username, password}",
+			"POST /accounts (Bearer)",
+			"GET /accounts/me (Bearer)",
+			"POST /transfers {to_user, amount_paise, idempotency_key} (Bearer)",
+			"GET /transfers/{id} (Bearer)",
+			"GET /healthz | /readyz | /metrics | /logs",
+		},
+	})
+}
+
 // Liveness: the process is up and serving.
 func (h *HealthHandler) Healthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

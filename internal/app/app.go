@@ -34,6 +34,7 @@ func NewHandler(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, metr
 		GetMyAccount:   walletH.GetMyAccount,
 		CreateTransfer: transferH.Create,
 		GetTransfer:    transferH.Get,
+		Index:          healthH.Index,
 		Healthz:        healthH.Healthz,
 		Readyz:         healthH.Readyz,
 		Metrics:        metrics.Handler(),
