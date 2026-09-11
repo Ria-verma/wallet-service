@@ -22,6 +22,9 @@ func Connect(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("parse DATABASE_URL: %w", err)
 	}
 	cfg.MaxConns = 10
+	// Keep a couple of connections warm: over a cross-region TLS link a
+	// cold dial can take seconds, which would make readiness flap.
+	cfg.MinConns = 2
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("connect database: %w", err)

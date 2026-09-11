@@ -26,7 +26,7 @@ func (h *HealthHandler) Healthz(w http.ResponseWriter, r *http.Request) {
 // Readiness: includes the datastore, so a dead database takes the instance
 // out of rotation instead of letting it accept writes it cannot honor.
 func (h *HealthHandler) Readyz(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	if err := h.db.Ping(ctx); err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "unready", "reason": "database unreachable"})
