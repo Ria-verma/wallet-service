@@ -1,0 +1,115 @@
+{
+  "info": {
+    "name": "wallet-service",
+    "description": "Wallet / P2P transfer service. Run requests top to bottom: Signup stores the token automatically; Transfer stores the transfer_id. Re-send Transfer unchanged to see an idempotent replay (200 + Idempotent-Replay header); change amount_paise but keep the key to see a 409.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "https://wallet-service-irfj.onrender.com" },
+    { "key": "token", "value": "" },
+    { "key": "token_b", "value": "" },
+    { "key": "transfer_id", "value": "" },
+    { "key": "username_a", "value": "demo_a_CHANGE_ME" },
+    { "key": "username_b", "value": "demo_b_CHANGE_ME" }
+  ],
+  "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }] },
+  "item": [
+    {
+      "name": "1. Signup user A",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "if (pm.response.code === 201) pm.collectionVariables.set('token', pm.response.json().token);"
+      ] } }],
+      "request": {
+        "auth": { "type": "noauth" },
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{base_url}}/auth/signup",
+        "body": { "mode": "raw", "raw": "{\n  \"username\": \"{{username_a}}\",\n  \"password\": \"password123\"\n}" }
+      }
+    },
+    {
+      "name": "2. Signup user B (recipient)",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "if (pm.response.code === 201) pm.collectionVariables.set('token_b', pm.response.json().token);"
+      ] } }],
+      "request": {
+        "auth": { "type": "noauth" },
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{base_url}}/auth/signup",
+        "body": { "mode": "raw", "raw": "{\n  \"username\": \"{{username_b}}\",\n  \"password\": \"password123\"\n}" }
+      }
+    },
+    {
+      "name": "3. Login (user A)",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "if (pm.response.code === 200) pm.collectionVariables.set('token', pm.response.json().token);"
+      ] } }],
+      "request": {
+        "auth": { "type": "noauth" },
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{base_url}}/auth/login",
+        "body": { "mode": "raw", "raw": "{\n  \"username\": \"{{username_a}}\",\n  \"password\": \"password123\"\n}" }
+      }
+    },
+    {
+      "name": "4. Create my wallet (get-or-create)",
+      "request": {
+        "method": "POST",
+        "url": "{{base_url}}/accounts"
+      }
+    },
+    {
+      "name": "5. My balance",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/accounts/me"
+      }
+    },
+    {
+      "name": "6. Transfer A -> B (re-send = idempotent replay)",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "const j = pm.response.json();",
+        "if (j.transfer_id) pm.collectionVariables.set('transfer_id', j.transfer_id);"
+      ] } }],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{base_url}}/transfers",
+        "body": { "mode": "raw", "raw": "{\n  \"to_user\": \"{{username_b}}\",\n  \"amount_paise\": 500,\n  \"idempotency_key\": \"ui-demo-1\"\n}" }
+      }
+    },
+    {
+      "name": "7. Get transfer details",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/transfers/{{transfer_id}}"
+      }
+    },
+    {
+      "name": "8. B's balance (uses token_b)",
+      "request": {
+        "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token_b}}", "type": "string" }] },
+        "method": "GET",
+        "url": "{{base_url}}/accounts/me"
+      }
+    },
+    {
+      "name": "Health: healthz",
+      "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "{{base_url}}/healthz" }
+    },
+    {
+      "name": "Health: readyz",
+      "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "{{base_url}}/readyz" }
+    },
+    {
+      "name": "Observability: recent logs",
+      "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "{{base_url}}/logs?limit=100" }
+    },
+    {
+      "name": "Observability: metrics",
+      "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "{{base_url}}/metrics" }
+    }
+  ]
+}
