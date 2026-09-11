@@ -84,6 +84,7 @@ random burst, replay-after-balance-drop, and the full edge-case matrix.
 - **Config** (env only): `DATABASE_URL`, `JWT_SECRET`, `PORT`,
   `INITIAL_BALANCE_PAISE`.
 
-Deployed on Render's free tier (Docker runtime) + Neon free Postgres.
+Deployed at **https://wallet-service-irfj.onrender.com** — Render free tier
+(Docker runtime, Ohio, co-located with the database) + Neon free Postgres.
 Note: the free instance sleeps when idle — the first request after a quiet
 period takes ~1 min to cold-start.

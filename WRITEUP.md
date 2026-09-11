@@ -1,6 +1,6 @@
 # Write-up — Wallet / P2P Transfer Service
 
-**Live:** `<RENDER_URL>` · **Repo:** `<GITHUB_URL>` · **Logs:** `<RENDER_URL>/logs` · **Metrics:** `<RENDER_URL>/metrics` · **Gate:** `./scripts/burst.sh <RENDER_URL>`
+**Live:** https://wallet-service-irfj.onrender.com · **Repo:** https://github.com/Ria-verma/wallet-service · **Logs:** https://wallet-service-irfj.onrender.com/logs · **Metrics:** https://wallet-service-irfj.onrender.com/metrics · **Gate:** `./scripts/burst.sh https://wallet-service-irfj.onrender.com`
 
 ## Data model
 
