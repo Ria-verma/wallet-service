@@ -1,0 +1,33 @@
+# One command brings up app + db:  docker compose up --build
+# The db credentials below are local-development-only (the container's
+# Postgres is not reachable beyond localhost); production secrets come
+# exclusively from the host environment.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: wallet
+      POSTGRES_PASSWORD: wallet
+      POSTGRES_DB: wallet
+    volumes:
+      - ./.data/compose-pg:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5433:5432" # host access for `go test -tags integration`
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wallet -d wallet"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgres://wallet:wallet@db:5432/wallet?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET:-local-dev-secret-not-for-prod}
+      PORT: "8080"
+      INITIAL_BALANCE_PAISE: "100000"
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
