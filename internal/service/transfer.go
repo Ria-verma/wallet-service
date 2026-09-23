@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -23,13 +24,14 @@ type TransferStore interface {
 }
 
 type TransferService struct {
-	store     TransferStore
-	seedPaise int64
-	metrics   *obs.Metrics
+	store       TransferStore
+	seedPaise   int64
+	claimWindow time.Duration
+	metrics     *obs.Metrics
 }
 
-func NewTransferService(store TransferStore, seedPaise int64, metrics *obs.Metrics) *TransferService {
-	return &TransferService{store: store, seedPaise: seedPaise, metrics: metrics}
+func NewTransferService(store TransferStore, seedPaise int64, claimWindow time.Duration, metrics *obs.Metrics) *TransferService {
+	return &TransferService{store: store, seedPaise: seedPaise, claimWindow: claimWindow, metrics: metrics}
 }
 
 type TransferResult struct {
@@ -111,6 +113,15 @@ func (t *TransferService) Execute(ctx context.Context, senderID uuid.UUID, toUse
 			balances[id] = bal
 		}
 
+		// Money the sender received within the claim window is still
+		// claimable by its senders, so it sits in the balance but is not
+		// spendable. This is the invariant that guarantees a claim-back can
+		// always be honored: balance >= sum of active holds, at all times.
+		heldPaise, err := tx.SumActiveHolds(ctx, senderID, t.claimWindow)
+		if err != nil {
+			return err
+		}
+
 		// Claim the idempotency key BEFORE the funds check: a replay of an
 		// already-applied transfer must return its original outcome even if
 		// the sender's balance has since dropped.
@@ -130,9 +141,10 @@ func (t *TransferService) Execute(ctx context.Context, senderID uuid.UUID, toUse
 			return errKeyExists
 		}
 
-		if newBalance < 0 {
-			// Rolling back also discards the transfer row above, so a
-			// rejection never claims the idempotency key.
+		if newBalance < heldPaise {
+			// Spendable funds (balance minus active holds) don't cover the
+			// amount. Rolling back also discards the transfer row above, so
+			// a rejection never claims the idempotency key.
 			return ErrInsufficientFunds
 		}
 
@@ -203,6 +215,124 @@ func (t *TransferService) GetByID(ctx context.Context, callerID, transferID uuid
 		return models.Transfer{}, ErrNotFound
 	}
 	return tr, nil
+}
+
+type ClaimResult struct {
+	TransferID uuid.UUID
+	NewBalance int64
+	ReversedAt time.Time
+	Replayed   bool
+}
+
+// errClaimNotApplied aborts the claim transaction when the conditional
+// reversal matched no row; the caller resolves replay-vs-expired outside.
+var errClaimNotApplied = errors.New("claim not applied")
+
+// ClaimBack reverses a transfer at the sender's request, exactly once,
+// while it is inside the claim window.
+//
+// The reversal can never fail for lack of funds: Execute never lets a
+// wallet spend below its active holds, so until this transfer is reversed
+// or its window expires, its amount is provably still in the recipient's
+// balance. Exactly-once is decided by the conditional completed→reversed
+// UPDATE (MarkReversed) run under both wallet locks — taken in the same
+// ascending user_id order as Execute, so no new deadlock cases. No new
+// transfer row is written: a reversal is not itself claimable, and the
+// returned money carries no hold.
+func (t *TransferService) ClaimBack(ctx context.Context, callerID, transferID uuid.UUID) (ClaimResult, error) {
+	tr, err := t.store.GetTransferByID(ctx, transferID)
+	if err != nil {
+		return ClaimResult{}, mapRepoNotFound(err, ErrNotFound)
+	}
+	if tr.SenderID != callerID {
+		// Only the sender may claim; everyone else gets not-found so
+		// transfer IDs don't leak existence (same rule as GetByID).
+		t.metrics.ClaimsRejected.WithLabelValues("not_sender").Inc()
+		return ClaimResult{}, ErrNotFound
+	}
+	if tr.Status == models.TransferReversed {
+		// Reversed is terminal, so replaying from this read is race-free.
+		return t.replayClaim(ctx, tr), nil
+	}
+
+	var result ClaimResult
+	err = t.store.WithTx(ctx, func(tx repository.Tx) error {
+		ids := []uuid.UUID{tr.SenderID, tr.RecipientID}
+		sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
+
+		balances := make(map[uuid.UUID]int64, 2)
+		for _, id := range ids {
+			bal, err := tx.LockWallet(ctx, id)
+			if err != nil {
+				return err
+			}
+			balances[id] = bal
+		}
+
+		senderAfter := balances[tr.SenderID] + tr.AmountPaise
+		reversedAt, reversed, err := tx.MarkReversed(ctx, tr.ID, t.claimWindow, senderAfter)
+		if err != nil {
+			return err
+		}
+		if !reversed {
+			return errClaimNotApplied
+		}
+
+		if err := tx.UpdateWalletBalance(ctx, tr.RecipientID, balances[tr.RecipientID]-tr.AmountPaise); err != nil {
+			return err
+		}
+		if err := tx.UpdateWalletBalance(ctx, tr.SenderID, senderAfter); err != nil {
+			return err
+		}
+
+		result = ClaimResult{TransferID: tr.ID, NewBalance: senderAfter, ReversedAt: reversedAt}
+		return nil
+	})
+
+	switch {
+	case err == nil:
+		t.metrics.ClaimsApplied.Inc()
+		obs.Log(ctx).Info("claim_applied",
+			"transfer_id", tr.ID, "sender_id", tr.SenderID,
+			"recipient_id", tr.RecipientID, "amount_paise", tr.AmountPaise)
+		return result, nil
+
+	case errors.Is(err, errClaimNotApplied):
+		return t.resolveUnappliedClaim(ctx, tr.ID)
+
+	default:
+		return ClaimResult{}, err
+	}
+}
+
+// resolveUnappliedClaim distinguishes why the conditional reversal matched
+// nothing: a concurrent claim already won (replay its outcome), or the
+// claim window has expired.
+func (t *TransferService) resolveUnappliedClaim(ctx context.Context, transferID uuid.UUID) (ClaimResult, error) {
+	tr, err := t.store.GetTransferByID(ctx, transferID)
+	if err != nil {
+		return ClaimResult{}, fmt.Errorf("load transfer after unapplied claim: %w", err)
+	}
+	if tr.Status == models.TransferReversed {
+		return t.replayClaim(ctx, tr), nil
+	}
+	t.metrics.ClaimsRejected.WithLabelValues("window_expired").Inc()
+	obs.Log(ctx).Info("claim_window_expired", "transfer_id", tr.ID, "sender_id", tr.SenderID)
+	return ClaimResult{}, ErrClaimWindowExpired
+}
+
+// replayClaim returns the stored outcome of an already-applied reversal.
+// Status reversed guarantees reversed_at and sender_balance_after_reversal
+// were set by the same UPDATE.
+func (t *TransferService) replayClaim(ctx context.Context, tr models.Transfer) ClaimResult {
+	t.metrics.ClaimReplays.Inc()
+	obs.Log(ctx).Info("claim_replay", "transfer_id", tr.ID, "sender_id", tr.SenderID)
+	return ClaimResult{
+		TransferID: tr.ID,
+		NewBalance: *tr.SenderBalanceAfterReversal,
+		ReversedAt: *tr.ReversedAt,
+		Replayed:   true,
+	}
 }
 
 func hashBody(toUsername string, amountPaise int64) string {

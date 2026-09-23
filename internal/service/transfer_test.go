@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -34,7 +35,7 @@ func (s stubStore) GetUserByUsername(context.Context, string) (models.User, erro
 }
 
 func TestTransferValidationShortCircuits(t *testing.T) {
-	svc := NewTransferService(stubStore{t}, 100000, obs.NewMetrics())
+	svc := NewTransferService(stubStore{t}, 100000, 24*time.Hour, obs.NewMetrics())
 	sender := uuid.New()
 
 	cases := []struct {
@@ -55,6 +56,52 @@ func TestTransferValidationShortCircuits(t *testing.T) {
 				t.Errorf("want ValidationError, got %v", err)
 			}
 		})
+	}
+}
+
+// claimStore serves one transfer read-only and fails the test if the claim
+// path reaches the transaction — used to prove authorization and replay
+// short-circuit before any locking.
+type claimStore struct {
+	stubStore
+	tr models.Transfer
+}
+
+func (s claimStore) GetTransferByID(context.Context, uuid.UUID) (models.Transfer, error) {
+	return s.tr, nil
+}
+
+func TestClaimBackOnlySenderMayClaim(t *testing.T) {
+	sender, recipient := uuid.New(), uuid.New()
+	tr := models.Transfer{ID: uuid.New(), SenderID: sender, RecipientID: recipient,
+		AmountPaise: 500, Status: models.TransferCompleted}
+	svc := NewTransferService(claimStore{stubStore{t}, tr}, 100000, 24*time.Hour, obs.NewMetrics())
+
+	for _, caller := range []uuid.UUID{recipient, uuid.New()} {
+		if _, err := svc.ClaimBack(context.Background(), caller, tr.ID); !errors.Is(err, ErrNotFound) {
+			t.Errorf("caller %s: want ErrNotFound (no existence leak), got %v", caller, err)
+		}
+	}
+}
+
+func TestClaimBackReplaysReversedWithoutTx(t *testing.T) {
+	sender := uuid.New()
+	reversedAt := time.Now().Add(-time.Hour)
+	balanceAfter := int64(100500)
+	tr := models.Transfer{ID: uuid.New(), SenderID: sender, RecipientID: uuid.New(),
+		AmountPaise: 500, Status: models.TransferReversed,
+		ReversedAt: &reversedAt, SenderBalanceAfterReversal: &balanceAfter}
+	svc := NewTransferService(claimStore{stubStore{t}, tr}, 100000, 24*time.Hour, obs.NewMetrics())
+
+	result, err := svc.ClaimBack(context.Background(), sender, tr.ID)
+	if err != nil {
+		t.Fatalf("replay claim: %v", err)
+	}
+	if !result.Replayed {
+		t.Error("second claim must be marked Replayed")
+	}
+	if result.NewBalance != balanceAfter || !result.ReversedAt.Equal(reversedAt) {
+		t.Errorf("replay must return the stored outcome, got %+v", result)
 	}
 }
 

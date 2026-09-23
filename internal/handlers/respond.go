@@ -40,9 +40,11 @@ func writeDomainError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, service.ErrNoWallet):
 		writeError(w, http.StatusNotFound, "no_wallet", "no wallet yet; call POST /accounts first")
 	case errors.Is(err, service.ErrInsufficientFunds):
-		writeError(w, http.StatusUnprocessableEntity, "insufficient_funds", "balance is lower than the transfer amount")
+		writeError(w, http.StatusUnprocessableEntity, "insufficient_funds", "available balance is lower than the transfer amount (recently received money is on hold while its senders can still claim it back)")
 	case errors.Is(err, service.ErrIdempotencyConflict):
 		writeError(w, http.StatusConflict, "idempotency_conflict", "idempotency_key was already used with a different request body")
+	case errors.Is(err, service.ErrClaimWindowExpired):
+		writeError(w, http.StatusConflict, "claim_window_expired", "the claim window for this transfer has expired")
 	case errors.Is(err, service.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 	default:

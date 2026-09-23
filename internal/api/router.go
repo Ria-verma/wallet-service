@@ -16,6 +16,7 @@ type Routes struct {
 	GetMyAccount   http.HandlerFunc
 	CreateTransfer http.HandlerFunc
 	GetTransfer    http.HandlerFunc
+	ClaimTransfer  http.HandlerFunc
 	Index          http.HandlerFunc
 	Healthz        http.HandlerFunc
 	Readyz         http.HandlerFunc
@@ -36,6 +37,7 @@ func NewRouter(routes Routes, verifier TokenVerifier, m *obs.Metrics, logger *sl
 	mux.Handle("GET /accounts/me", authed(routes.GetMyAccount))
 	mux.Handle("POST /transfers", authed(routes.CreateTransfer))
 	mux.Handle("GET /transfers/{id}", authed(routes.GetTransfer))
+	mux.Handle("POST /transfers/{id}/claim", authed(routes.ClaimTransfer))
 	mux.HandleFunc("GET /{$}", routes.Index)
 	mux.HandleFunc("GET /healthz", routes.Healthz)
 	mux.HandleFunc("GET /readyz", routes.Readyz)

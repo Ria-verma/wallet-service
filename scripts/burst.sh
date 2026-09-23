@@ -39,7 +39,12 @@ xfer() {
     -H "Authorization: Bearer $1" -H 'Content-Type: application/json' \
     -d "{\"to_user\":\"$2\",\"amount_paise\":$3,\"idempotency_key\":\"$4\"}" > "$5.code"
 }
-export -f xfer
+# clm TOKEN TRANSFER_ID OUTFILE — status to .code, body to .body, headers to .hdr
+clm() {
+  curl -sS -D "$3.hdr" -o "$3.body" -w '%{http_code}\n' -X POST \
+    "$BASE/transfers/$2/claim" -H "Authorization: Bearer $1" > "$3.code"
+}
+export -f xfer clm
 export BASE
 
 echo "== Setup: two brand-new users =="
@@ -103,8 +108,33 @@ READ_OK="$(curl -sS -o /dev/null -w '%{http_code}' "$BASE/transfers/$TID" -H "Au
 [ "$READ_OK" = "200" ] && pass "participant can read the transfer" || fail "participant read -> $READ_OK"
 
 echo
+echo "== Phase C: $RETRIES concurrent CLAIMS of the shared-key transfer =="
+# Only the sender may claim; the recipient must get a 404 first.
+DENIED="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/transfers/$TID/claim" -H "Authorization: Bearer $TOK_B")"
+[ "$DENIED" = "404" ] && pass "recipient cannot claim (404, no existence leak)" || fail "recipient claim -> $DENIED, want 404"
+
+for i in $(seq 1 "$RETRIES"); do printf '%s\t%s\t%s\n' "$TOK_A" "$TID" "$TMP/c_$i"; done \
+  | xargs -P 30 -n 3 bash -c 'clm "$1" "$2" "$3"' _
+
+CODES_C="$(cat "$TMP"/c_*.code)"
+C5XX="$(grep -c '^5' <<<"$CODES_C" || true)"
+C200="$(grep -c '^200$' <<<"$CODES_C" || true)"
+REPLAYS="$(grep -lis '^Idempotent-Replay: true' "$TMP"/c_*.hdr | wc -l | tr -d ' ')"
+REVERSED_ATS="$(cat "$TMP"/c_*.body | jq -r .reversed_at | sort -u | wc -l | tr -d ' ')"
+
+[ "$C5XX" -eq 0 ] && pass "zero 5xx under the claim burst" || fail "$C5XX claim responses were 5xx"
+[ "$C200" -eq "$RETRIES" ] && pass "every claim answered 200" || fail "$C200/$RETRIES claims got 200"
+[ "$REPLAYS" -eq $((RETRIES-1)) ] && pass "reversal applied exactly once ($REPLAYS replays)" || fail "$REPLAYS replays, want $((RETRIES-1))"
+[ "$REVERSED_ATS" -eq 1 ] && pass "every response carries the same reversed_at" || fail "$REVERSED_ATS distinct reversed_at values, want 1"
+
+BAL_A3="$(balance "$TOK_A")"; BAL_B3="$(balance "$TOK_B")"
+[ "$BAL_A3" -eq "$BAL_A1" ] && pass "sender refunded exactly once (back to $BAL_A1)" || fail "sender balance $BAL_A3, want $BAL_A1"
+[ "$BAL_B3" -eq "$BAL_B1" ] && pass "recipient debited exactly once (back to $BAL_B1)" || fail "recipient balance $BAL_B3, want $BAL_B1"
+[ $((BAL_A3 + BAL_B3)) -eq "$SUM1" ] && pass "total money conserved through the reversal" || fail "conservation violated: $SUM1 -> $((BAL_A3 + BAL_B3))"
+
+echo
 if [ "$FAILED" -eq 0 ]; then
-  echo "RESULT: PASS — wallets created once, retries applied once, money conserved."
+  echo "RESULT: PASS — wallets created once, retries applied once, claims reversed once, money conserved."
 else
   echo "RESULT: FAIL — see ✗ lines above."
   exit 1

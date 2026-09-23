@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "wallet-service",
-    "description": "Wallet / P2P transfer service. Run requests top to bottom: Signup stores the token automatically; Transfer stores the transfer_id. Re-send Transfer unchanged to see an idempotent replay (200 + Idempotent-Replay header); change amount_paise but keep the key to see a 409.",
+    "description": "Wallet / P2P transfer service. Run requests top to bottom: Signup stores the token automatically; Transfer stores the transfer_id. Re-send Transfer unchanged to see an idempotent replay (200 + Idempotent-Replay header); change amount_paise but keep the key to see a 409. Claim back reverses the transfer (sender-only, 24h window); re-send it to see the exactly-once replay.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -88,11 +88,26 @@
       }
     },
     {
-      "name": "8. B's balance (uses token_b)",
+      "name": "8. B's balance (uses token_b; note available_paise excludes held money)",
       "request": {
         "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token_b}}", "type": "string" }] },
         "method": "GET",
         "url": "{{base_url}}/accounts/me"
+      }
+    },
+    {
+      "name": "9. Claim back A -> B (re-send = exactly-once replay)",
+      "request": {
+        "method": "POST",
+        "url": "{{base_url}}/transfers/{{transfer_id}}/claim"
+      }
+    },
+    {
+      "name": "10. Claim as B -> 404 (sender-only)",
+      "request": {
+        "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token_b}}", "type": "string" }] },
+        "method": "POST",
+        "url": "{{base_url}}/transfers/{{transfer_id}}/claim"
       }
     },
     {

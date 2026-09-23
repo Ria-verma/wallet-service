@@ -7,8 +7,8 @@
 Three tables (Postgres, migrations embedded and applied at startup):
 `users(id uuid pk, username unique, password_hash)` ·
 `wallets(user_id pk → users, balance_paise bigint CHECK >= 0)` ·
-`transfers(id uuid pk, sender_id, recipient_id, amount_paise bigint CHECK > 0, idempotency_key, body_hash, sender_balance_after, UNIQUE(sender_id, idempotency_key))`.
-Money is integer paise everywhere; the CHECK constraints are a last-line net behind the application logic. `sender_balance_after` is stored so a replay returns the *original* `new_balance`.
+`transfers(id uuid pk, sender_id, recipient_id, amount_paise bigint CHECK > 0, idempotency_key, body_hash, sender_balance_after, status completed|reversed, reversed_at, sender_balance_after_reversal, UNIQUE(sender_id, idempotency_key))`.
+Money is integer paise everywhere; the CHECK constraints are a last-line net behind the application logic. `sender_balance_after` is stored so a replay returns the *original* `new_balance` (and `sender_balance_after_reversal` does the same for claim retries).
 
 ## Get-or-create + transfer under concurrency
 
@@ -21,6 +21,12 @@ Every check-then-act race is resolved by making the database do the check and th
 ## Idempotency
 
 The key lives **on the transfers row** with `UNIQUE(sender_id, idempotency_key)`, inserted **inside the money-moving transaction** — so the key exists *iff* the funds moved; there is no window where one is true without the other. The insert uses `ON CONFLICT DO NOTHING`; on conflict we roll back and re-read the winner's row: matching `body_hash` (sha256 of `to_user|amount_paise`) → **200** replay of the stored outcome with `Idempotent-Replay: true`; different hash → **409**. The claim happens *before* the funds check, so a replay returns its original success even if the balance has since dropped (covered by a test). Rejections (422 etc.) deliberately don't claim the key — they moved no money, so a later retry after a top-up may legitimately succeed. Keys are scoped per sender and kept indefinitely at this scale; in production I'd prune rows older than the client retry horizon (e.g. 30 days) with a scheduled delete.
+
+## Claim-back: guaranteed 24 h reversal, exactly once
+
+Requirement: the sender can reverse a transfer for 24 h, the reversal must **always succeed**, and must apply **exactly once**. Three designs were considered. *Delayed settlement* (recipient credited only after 24 h) trivially guarantees the reversal but delays every credit by a day and needs a settlement worker. *Compensating reversal* (credit is final, claim creates an opposite transfer) is how card chargebacks work and is the least code, but the recipient may have spent the money — the reversal becomes best-effort, which violates the requirement. Chosen: **immediate credit + hold**. The recipient's balance is credited instantly, but for the claim window the amount counts against their *spendable* balance: every debit is checked against `balance − SUM(incoming completed transfers younger than the window)`, computed under the wallet's row lock. This yields the invariant *balance ≥ active holds at all times*, which is the proof the reversal can never fail: until a transfer is reversed or expires, its amount is still in the recipient's balance.
+
+A hold is **not stored state** — it is that SQL predicate evaluated at debit time. Expiry is lazy (the row simply stops matching), so there is no scheduler, no cleanup, and exactly one clock (Postgres's `now()`), which also makes expiry testable by backdating `created_at`. **Exactly-once** is one conditional statement inside a transaction that holds both wallet locks (taken in the same ascending-id order as transfers): `UPDATE transfers SET status='reversed' … WHERE id=$1 AND status='completed' AND created_at > now() - window`. Concurrent claims serialize on the locks; exactly one matches the row. The loser (and any later retry) re-reads: already reversed → 200 replay of the stored outcome (`Idempotent-Replay: true` — the transfer id itself is the idempotency key), still completed → the window expired → 409. Deliberately, a reversal writes **no new transfer row** — a status flip plus two balance updates — so a reversal is not itself claimable and returned money carries no hold. Only the sender may claim; others get 404, matching the read rule.
 
 ## Identity & authorization
 
@@ -40,7 +46,7 @@ Multi-stage Dockerfile: static Go build → **distroless non-root** (~10 MB); `H
 
 ## Verification
 
-Unit tests plus an integration suite (`go test -tags integration ./test/`) that boots the real stack against a real Postgres (embedded automatically if `DATABASE_URL` is unset) and reproduces the gate: bidirectional concurrent first-transfers, 50 concurrent same-key retries, conservation under a 100-transfer random burst, replay-after-balance-drop, and the authorization matrix. `scripts/burst.sh` runs the same gate against any URL.
+Unit tests plus an integration suite (`go test -tags integration ./test/`) that boots the real stack against a real Postgres (embedded automatically if `DATABASE_URL` is unset) and reproduces the gate: bidirectional concurrent first-transfers, 50 concurrent same-key retries, conservation under a 100-transfer random burst, replay-after-balance-drop, and the authorization matrix. The claim-back suite covers: 30 concurrent claims of one transfer (exactly one applies), holds blocking spends of claimable money down to the paisa, the claim still succeeding after the recipient drains their own funds, window expiry (via backdated `created_at`), sender-only authorization, and claimed-back money being immediately spendable. `scripts/burst.sh` runs the same gate against any URL.
 
 ## AI usage & cost
 

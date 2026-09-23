@@ -18,13 +18,15 @@ func (s *Store) GetTransferBySenderKey(ctx context.Context, senderID uuid.UUID, 
 }
 
 const transferSelect = `SELECT id, sender_id, recipient_id, amount_paise,
-	idempotency_key, body_hash, sender_balance_after, created_at FROM transfers`
+	idempotency_key, body_hash, sender_balance_after, status, created_at,
+	reversed_at, sender_balance_after_reversal FROM transfers`
 
 type row interface{ Scan(dest ...any) error }
 
 func scanTransfer(r row) (models.Transfer, error) {
 	var t models.Transfer
 	err := r.Scan(&t.ID, &t.SenderID, &t.RecipientID, &t.AmountPaise,
-		&t.IdempotencyKey, &t.BodyHash, &t.SenderBalanceAfter, &t.CreatedAt)
+		&t.IdempotencyKey, &t.BodyHash, &t.SenderBalanceAfter, &t.Status,
+		&t.CreatedAt, &t.ReversedAt, &t.SenderBalanceAfterReversal)
 	return t, mapNoRows(err)
 }

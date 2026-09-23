@@ -61,6 +61,36 @@ func (h *TransferHandler) Get(w http.ResponseWriter, r *http.Request) {
 		SenderID:    tr.SenderID.String(),
 		RecipientID: tr.RecipientID.String(),
 		AmountPaise: tr.AmountPaise,
+		Status:      tr.Status,
 		CreatedAt:   tr.CreatedAt,
+		ReversedAt:  tr.ReversedAt,
+	})
+}
+
+// Claim lets the sender reverse their transfer within the claim window.
+// Retries are idempotent: an already-reversed transfer replays the original
+// outcome with the same marker header the transfer endpoint uses.
+func (h *TransferHandler) Claim(w http.ResponseWriter, r *http.Request) {
+	transferID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "resource not found")
+		return
+	}
+	callerID := api.UserID(r.Context())
+
+	result, err := h.transfers.ClaimBack(r.Context(), callerID, transferID)
+	if err != nil {
+		writeDomainError(w, r, err)
+		return
+	}
+
+	if result.Replayed {
+		w.Header().Set("Idempotent-Replay", "true")
+	}
+	writeJSON(w, http.StatusOK, dto.ClaimResponse{
+		TransferID: result.TransferID.String(),
+		Status:     "reversed",
+		NewBalance: result.NewBalance,
+		ReversedAt: result.ReversedAt,
 	})
 }

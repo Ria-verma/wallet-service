@@ -86,6 +86,7 @@ func run(m *testing.M) (int, error) {
 		JWTSecret:           "integration-test-secret-123",
 		InitialBalancePaise: seedPaise,
 		TokenTTL:            time.Hour,
+		ClaimWindow:         24 * time.Hour,
 	}
 	ring := obs.NewRing(100)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -162,6 +163,33 @@ func balance(t *testing.T, token string) int64 {
 		t.Fatalf("GET /accounts/me: status %d body %v", r.status, r.body)
 	}
 	return int64(r.body["balance_paise"].(float64))
+}
+
+func availableBalance(t *testing.T, token string) int64 {
+	t.Helper()
+	r := call(t, "GET", "/accounts/me", token, nil)
+	if r.status != http.StatusOK {
+		t.Fatalf("GET /accounts/me: status %d body %v", r.status, r.body)
+	}
+	return int64(r.body["available_paise"].(float64))
+}
+
+func claim(t *testing.T, token, transferID string) resp {
+	t.Helper()
+	return call(t, "POST", "/transfers/"+transferID+"/claim", token, nil)
+}
+
+// backdateTransfer ages a transfer past the claim window; the window check
+// runs on the database clock, so shifting created_at is the only knob the
+// tests need — no injected clocks.
+func backdateTransfer(t *testing.T, transferID string, age time.Duration) {
+	t.Helper()
+	_, err := testPool.Exec(context.Background(),
+		`UPDATE transfers SET created_at = created_at - make_interval(secs => $2) WHERE id = $1`,
+		transferID, age.Seconds())
+	if err != nil {
+		t.Fatalf("backdate transfer: %v", err)
+	}
 }
 
 func walletRowCount(t *testing.T, username string) int {
@@ -459,6 +487,189 @@ func TestAccountBeforeWallet(t *testing.T) {
 	_, tok := signup(t)
 	if r := call(t, "GET", "/accounts/me", tok, nil); r.status != http.StatusNotFound {
 		t.Errorf("GET /accounts/me before wallet: %d, want 404", r.status)
+	}
+}
+
+// ---- Claim-back (24h transfer reversal) ----------------------------------
+
+func TestClaimBackHappyPath(t *testing.T) {
+	_, aTok := signup(t)
+	bob, bTok := signup(t)
+
+	created := transfer(t, aTok, bob, 500, "claim-happy")
+	if created.status != http.StatusCreated {
+		t.Fatalf("transfer: %d (%v)", created.status, created.body)
+	}
+	id := created.body["transfer_id"].(string)
+
+	r := claim(t, aTok, id)
+	if r.status != http.StatusOK {
+		t.Fatalf("claim: %d (%v)", r.status, r.body)
+	}
+	if r.body["status"] != "reversed" {
+		t.Errorf("claim status = %v, want reversed", r.body["status"])
+	}
+	if nb := int64(r.body["new_balance"].(float64)); nb != seedPaise {
+		t.Errorf("sender new_balance = %d, want %d", nb, seedPaise)
+	}
+	if a, b := balance(t, aTok), balance(t, bTok); a != seedPaise || b != seedPaise {
+		t.Errorf("balances after claim: sender=%d recipient=%d, want %d each", a, b, seedPaise)
+	}
+	// The hold disappears with the reversal: recipient fully spendable again.
+	if av := availableBalance(t, bTok); av != seedPaise {
+		t.Errorf("recipient available = %d, want %d", av, seedPaise)
+	}
+	// The transfer now reads as reversed.
+	get := call(t, "GET", "/transfers/"+id, aTok, nil)
+	if get.body["status"] != "reversed" || get.body["reversed_at"] == nil {
+		t.Errorf("GET transfer after claim: %v", get.body)
+	}
+}
+
+// Many concurrent claims of the SAME transfer: the reversal applies exactly
+// once, every caller gets the same outcome, balances move once.
+func TestClaimBackExactlyOnceConcurrent(t *testing.T) {
+	_, aTok := signup(t)
+	bob, bTok := signup(t)
+
+	const n, amount = 30, 700
+	created := transfer(t, aTok, bob, amount, "claim-race")
+	if created.status != http.StatusCreated {
+		t.Fatalf("transfer: %d (%v)", created.status, created.body)
+	}
+	id := created.body["transfer_id"].(string)
+
+	results := runConcurrent(n, func(int) resp {
+		return claim(t, aTok, id)
+	})
+
+	no5xx(t, results, "concurrent claims")
+	var applied, replayed int
+	reversedAts := map[any]bool{}
+	for _, r := range results {
+		if r.status != http.StatusOK {
+			t.Errorf("claim status = %d (%v), want 200", r.status, r.body)
+			continue
+		}
+		if r.header.Get("Idempotent-Replay") == "true" {
+			replayed++
+		} else {
+			applied++
+		}
+		reversedAts[r.body["reversed_at"]] = true
+		if nb := int64(r.body["new_balance"].(float64)); nb != seedPaise {
+			t.Errorf("new_balance = %d, want %d", nb, seedPaise)
+		}
+	}
+	if applied != 1 {
+		t.Errorf("applied = %d, want exactly 1 non-replayed claim", applied)
+	}
+	if replayed != n-1 {
+		t.Errorf("replayed = %d, want %d", replayed, n-1)
+	}
+	if len(reversedAts) != 1 {
+		t.Errorf("distinct reversed_at values = %d, want 1", len(reversedAts))
+	}
+	if a, b := balance(t, aTok), balance(t, bTok); a != seedPaise || b != seedPaise {
+		t.Errorf("balances after claim race: sender=%d recipient=%d, want %d each", a, b, seedPaise)
+	}
+}
+
+// Received money is on hold while claimable: the recipient can spend their
+// own funds but not the held amount — which is exactly what guarantees the
+// later claim-back can never fail.
+func TestHoldBlocksSpendingHeldFunds(t *testing.T) {
+	_, aTok := signup(t)
+	bob, bTok := signup(t)
+	carol, _ := signup(t)
+
+	created := transfer(t, aTok, bob, 500, "hold-in")
+	if created.status != http.StatusCreated {
+		t.Fatalf("transfer: %d (%v)", created.status, created.body)
+	}
+	id := created.body["transfer_id"].(string)
+
+	if bal, av := balance(t, bTok), availableBalance(t, bTok); bal != seedPaise+500 || av != seedPaise {
+		t.Fatalf("recipient balance/available = %d/%d, want %d/%d", bal, av, seedPaise+500, seedPaise)
+	}
+	// One paisa into the held amount must be rejected...
+	if r := transfer(t, bTok, carol, seedPaise+1, "spend-held"); r.status != http.StatusUnprocessableEntity {
+		t.Errorf("spending held funds: %d (%v), want 422", r.status, r.body)
+	}
+	// ...but everything up to the hold is spendable.
+	if r := transfer(t, bTok, carol, seedPaise, "spend-own"); r.status != http.StatusCreated {
+		t.Errorf("spending own funds: %d (%v), want 201", r.status, r.body)
+	}
+
+	// Bob's balance is now exactly the held 500 — the claim must still work.
+	if r := claim(t, aTok, id); r.status != http.StatusOK {
+		t.Errorf("claim after recipient drained own funds: %d (%v)", r.status, r.body)
+	}
+	if a, b := balance(t, aTok), balance(t, bTok); a != seedPaise || b != 0 {
+		t.Errorf("balances after claim: sender=%d recipient=%d, want %d/0", a, b, seedPaise)
+	}
+}
+
+func TestClaimWindowExpired(t *testing.T) {
+	_, aTok := signup(t)
+	bob, bTok := signup(t)
+
+	created := transfer(t, aTok, bob, 300, "claim-old")
+	id := created.body["transfer_id"].(string)
+	backdateTransfer(t, id, 25*time.Hour)
+
+	r := claim(t, aTok, id)
+	if r.status != http.StatusConflict {
+		t.Errorf("expired claim: %d (%v), want 409", r.status, r.body)
+	}
+	if r.body["error"] != "claim_window_expired" {
+		t.Errorf("expired claim error = %v, want claim_window_expired", r.body["error"])
+	}
+	// The hold expired with the window: money is the recipient's for keeps.
+	if bal, av := balance(t, bTok), availableBalance(t, bTok); bal != seedPaise+300 || av != bal {
+		t.Errorf("recipient balance/available = %d/%d, want both %d", bal, av, seedPaise+300)
+	}
+}
+
+func TestClaimAuthorization(t *testing.T) {
+	_, aTok := signup(t)
+	bob, bTok := signup(t)
+	_, cTok := signup(t) // uninvolved third party
+
+	created := transfer(t, aTok, bob, 100, "claim-auth")
+	id := created.body["transfer_id"].(string)
+
+	if r := claim(t, bTok, id); r.status != http.StatusNotFound {
+		t.Errorf("recipient claim: %d, want 404 (only the sender may claim)", r.status)
+	}
+	if r := claim(t, cTok, id); r.status != http.StatusNotFound {
+		t.Errorf("third-party claim: %d, want 404 (no existence leak)", r.status)
+	}
+	if r := claim(t, aTok, "not-a-uuid"); r.status != http.StatusNotFound {
+		t.Errorf("malformed id: %d, want 404", r.status)
+	}
+	// Failed attempts must not burn the sender's claim.
+	if r := claim(t, aTok, id); r.status != http.StatusOK {
+		t.Errorf("sender claim after rejected attempts: %d, want 200", r.status)
+	}
+}
+
+// Money returned by a reversal carries no hold — a reversal is not a
+// transfer, so the sender can spend it immediately.
+func TestClaimedBackMoneySpendableImmediately(t *testing.T) {
+	_, aTok := signup(t)
+	bob, _ := signup(t)
+
+	created := transfer(t, aTok, bob, 400, "claim-respend")
+	id := created.body["transfer_id"].(string)
+	if r := claim(t, aTok, id); r.status != http.StatusOK {
+		t.Fatalf("claim: %d (%v)", r.status, r.body)
+	}
+	if av := availableBalance(t, aTok); av != seedPaise {
+		t.Errorf("sender available after claim = %d, want %d", av, seedPaise)
+	}
+	if r := transfer(t, aTok, bob, seedPaise, "respend-all"); r.status != http.StatusCreated {
+		t.Errorf("spending claimed-back money: %d (%v), want 201", r.status, r.body)
 	}
 }
 

@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -40,10 +41,20 @@ func (s *Store) GetOrCreateWallet(ctx context.Context, userID uuid.UUID, seedPai
 	return balance, created, raceLost, mapNoRows(err)
 }
 
-func (s *Store) GetWalletBalance(ctx context.Context, userID uuid.UUID) (int64, error) {
-	var balance int64
-	err := s.pool.QueryRow(ctx,
-		`SELECT balance_paise FROM wallets WHERE user_id = $1`, userID,
-	).Scan(&balance)
-	return balance, mapNoRows(err)
+// GetWalletBalances returns the raw balance and the spendable part of it:
+// available = balance minus incoming transfers still claimable by their
+// senders. One statement, so the two numbers are from the same snapshot.
+func (s *Store) GetWalletBalances(ctx context.Context, userID uuid.UUID, window time.Duration) (balance, available int64, err error) {
+	err = s.pool.QueryRow(ctx,
+		`SELECT w.balance_paise,
+		        w.balance_paise - COALESCE((
+		            SELECT SUM(t.amount_paise) FROM transfers t
+		            WHERE t.recipient_id = w.user_id
+		              AND t.status = 'completed'
+		              AND t.created_at > now() - make_interval(secs => $2)
+		        ), 0)
+		 FROM wallets w WHERE w.user_id = $1`,
+		userID, window.Seconds(),
+	).Scan(&balance, &available)
+	return balance, available, mapNoRows(err)
 }

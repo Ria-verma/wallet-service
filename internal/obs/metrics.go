@@ -16,6 +16,9 @@ type Metrics struct {
 	TransfersApplied    prometheus.Counter
 	TransfersRejected   *prometheus.CounterVec
 	IdempotentReplays   prometheus.Counter
+	ClaimsApplied       prometheus.Counter
+	ClaimsRejected      *prometheus.CounterVec
+	ClaimReplays        prometheus.Counter
 	GetOrCreateRaceLost prometheus.Counter
 	AuthFailures        prometheus.Counter
 }
@@ -44,6 +47,18 @@ func NewMetrics() *Metrics {
 			Name: "idempotent_replays_total",
 			Help: "Retried transfers answered from the stored outcome.",
 		}),
+		ClaimsApplied: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "claims_applied_total",
+			Help: "Transfers reversed at the sender's request.",
+		}),
+		ClaimsRejected: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "claims_rejected_total",
+			Help: "Claim-backs rejected, by reason.",
+		}, []string{"reason"}),
+		ClaimReplays: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "claim_replays_total",
+			Help: "Retried claim-backs answered from the stored outcome.",
+		}),
 		GetOrCreateRaceLost: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "get_or_create_race_lost_total",
 			Help: "Wallet creations that lost the concurrent insert race.",
@@ -56,6 +71,7 @@ func NewMetrics() *Metrics {
 	m.registry.MustRegister(
 		m.HTTPRequests, m.HTTPDuration,
 		m.TransfersApplied, m.TransfersRejected, m.IdempotentReplays,
+		m.ClaimsApplied, m.ClaimsRejected, m.ClaimReplays,
 		m.GetOrCreateRaceLost, m.AuthFailures,
 	)
 	return m

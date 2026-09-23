@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -68,6 +69,51 @@ func (t Tx) InsertTransfer(ctx context.Context, tr models.Transfer) (id uuid.UUI
 		return uuid.Nil, false, err
 	}
 	return id, true, nil
+}
+
+// SumActiveHolds totals the incoming transfers to userID that are still
+// claimable by their senders (completed, younger than the claim window).
+// That amount sits in the wallet's balance but must not be spendable, or a
+// later claim-back could fail. Callers must already hold the wallet's row
+// lock so the sum can't be invalidated by a concurrent transfer.
+//
+// Expiry is lazy: once created_at falls out of the window the row simply
+// stops matching — there is no hold state to clean up and no background job.
+func (t Tx) SumActiveHolds(ctx context.Context, userID uuid.UUID, window time.Duration) (int64, error) {
+	var held int64
+	err := t.tx.QueryRow(ctx,
+		`SELECT COALESCE(SUM(amount_paise), 0) FROM transfers
+		 WHERE recipient_id = $1
+		   AND status = 'completed'
+		   AND created_at > now() - make_interval(secs => $2)`,
+		userID, window.Seconds(),
+	).Scan(&held)
+	return held, err
+}
+
+// MarkReversed flips a transfer completed→reversed, but only while it is
+// still inside the claim window. reversed=false means this claim lost:
+// either another claim already won (status is reversed) or the window has
+// expired — the caller re-reads the row to tell the two apart. The
+// conditional WHERE is what makes the reversal exactly-once.
+func (t Tx) MarkReversed(ctx context.Context, transferID uuid.UUID, window time.Duration, senderBalanceAfter int64) (reversedAt time.Time, reversed bool, err error) {
+	err = t.tx.QueryRow(ctx,
+		`UPDATE transfers
+		 SET status = 'reversed', reversed_at = now(),
+		     sender_balance_after_reversal = $3
+		 WHERE id = $1
+		   AND status = 'completed'
+		   AND created_at > now() - make_interval(secs => $2)
+		 RETURNING reversed_at`,
+		transferID, window.Seconds(), senderBalanceAfter,
+	).Scan(&reversedAt)
+	if err == pgx.ErrNoRows {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	return reversedAt, true, nil
 }
 
 func (t Tx) UpdateWalletBalance(ctx context.Context, userID uuid.UUID, newBalance int64) error {

@@ -19,8 +19,8 @@ import (
 func NewHandler(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, metrics *obs.Metrics, ring *obs.Ring) http.Handler {
 	store := repository.New(pool)
 	authSvc := service.NewAuthService(store, cfg.JWTSecret, cfg.TokenTTL)
-	walletSvc := service.NewWalletService(store, cfg.InitialBalancePaise, metrics)
-	transferSvc := service.NewTransferService(store, cfg.InitialBalancePaise, metrics)
+	walletSvc := service.NewWalletService(store, cfg.InitialBalancePaise, cfg.ClaimWindow, metrics)
+	transferSvc := service.NewTransferService(store, cfg.InitialBalancePaise, cfg.ClaimWindow, metrics)
 
 	authH := handlers.NewAuthHandler(authSvc)
 	walletH := handlers.NewWalletHandler(walletSvc)
@@ -34,6 +34,7 @@ func NewHandler(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, metr
 		GetMyAccount:   walletH.GetMyAccount,
 		CreateTransfer: transferH.Create,
 		GetTransfer:    transferH.Get,
+		ClaimTransfer:  transferH.Claim,
 		Index:          healthH.Index,
 		Healthz:        healthH.Healthz,
 		Readyz:         healthH.Readyz,

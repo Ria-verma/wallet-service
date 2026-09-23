@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -10,17 +11,18 @@ import (
 
 type WalletRepository interface {
 	GetOrCreateWallet(ctx context.Context, userID uuid.UUID, seedPaise int64) (balance int64, created, raceLost bool, err error)
-	GetWalletBalance(ctx context.Context, userID uuid.UUID) (int64, error)
+	GetWalletBalances(ctx context.Context, userID uuid.UUID, window time.Duration) (balance, available int64, err error)
 }
 
 type WalletService struct {
-	wallets   WalletRepository
-	seedPaise int64
-	metrics   *obs.Metrics
+	wallets     WalletRepository
+	seedPaise   int64
+	claimWindow time.Duration
+	metrics     *obs.Metrics
 }
 
-func NewWalletService(wallets WalletRepository, seedPaise int64, metrics *obs.Metrics) *WalletService {
-	return &WalletService{wallets: wallets, seedPaise: seedPaise, metrics: metrics}
+func NewWalletService(wallets WalletRepository, seedPaise int64, claimWindow time.Duration, metrics *obs.Metrics) *WalletService {
+	return &WalletService{wallets: wallets, seedPaise: seedPaise, claimWindow: claimWindow, metrics: metrics}
 }
 
 func (w *WalletService) GetOrCreate(ctx context.Context, userID uuid.UUID) (int64, bool, error) {
@@ -38,10 +40,12 @@ func (w *WalletService) GetOrCreate(ctx context.Context, userID uuid.UUID) (int6
 	return balance, created, nil
 }
 
-func (w *WalletService) GetBalance(ctx context.Context, userID uuid.UUID) (int64, error) {
-	balance, err := w.wallets.GetWalletBalance(ctx, userID)
+// GetBalance returns the raw balance and the spendable part of it —
+// available excludes incoming transfers still claimable by their senders.
+func (w *WalletService) GetBalance(ctx context.Context, userID uuid.UUID) (balance, available int64, err error) {
+	balance, available, err = w.wallets.GetWalletBalances(ctx, userID, w.claimWindow)
 	if err != nil {
-		return 0, mapRepoNotFound(err, ErrNoWallet)
+		return 0, 0, mapRepoNotFound(err, ErrNoWallet)
 	}
-	return balance, nil
+	return balance, available, nil
 }

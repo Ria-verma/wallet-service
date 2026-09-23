@@ -42,10 +42,10 @@ func newTestAuth() *AuthService {
 func TestSignupValidation(t *testing.T) {
 	a := newTestAuth()
 	cases := []struct{ username, password string }{
-		{"ab", "password123"},           // username too short
-		{"has spaces", "password123"},   // invalid chars
-		{"validuser", "short"},          // password too short
-		{"", "password123"},             // empty username
+		{"ab", "password123"},         // username too short
+		{"has spaces", "password123"}, // invalid chars
+		{"validuser", "short"},        // password too short
+		{"", "password123"},           // empty username
 	}
 	for _, c := range cases {
 		var ve ValidationError

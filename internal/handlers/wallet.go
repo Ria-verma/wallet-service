@@ -33,10 +33,10 @@ func (h *WalletHandler) CreateAccount(w http.ResponseWriter, r *http.Request) {
 
 func (h *WalletHandler) GetMyAccount(w http.ResponseWriter, r *http.Request) {
 	userID := api.UserID(r.Context())
-	balance, err := h.wallets.GetBalance(r.Context(), userID)
+	balance, available, err := h.wallets.GetBalance(r.Context(), userID)
 	if err != nil {
 		writeDomainError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, dto.BalanceResponse{BalancePaise: balance})
+	writeJSON(w, http.StatusOK, dto.BalanceResponse{BalancePaise: balance, AvailablePaise: available})
 }

@@ -14,6 +14,7 @@ type Config struct {
 	InitialBalancePaise int64
 	TokenTTL            time.Duration
 	DBTimeout           time.Duration
+	ClaimWindow         time.Duration
 }
 
 // Load reads configuration from the environment and fails fast on anything
@@ -24,6 +25,7 @@ func Load() (Config, error) {
 		InitialBalancePaise: 100000,
 		TokenTTL:            24 * time.Hour,
 		DBTimeout:           5 * time.Second,
+		ClaimWindow:         24 * time.Hour,
 	}
 
 	cfg.DatabaseURL = os.Getenv("DATABASE_URL")
@@ -42,6 +44,14 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("INITIAL_BALANCE_PAISE must be a non-negative integer, got %q", v)
 		}
 		cfg.InitialBalancePaise = n
+	}
+
+	if v := os.Getenv("CLAIM_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return Config{}, fmt.Errorf("CLAIM_WINDOW must be a positive duration (e.g. 24h), got %q", v)
+		}
+		cfg.ClaimWindow = d
 	}
 
 	return cfg, nil

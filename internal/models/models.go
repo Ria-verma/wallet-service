@@ -20,6 +20,11 @@ type Wallet struct {
 	UpdatedAt    time.Time
 }
 
+const (
+	TransferCompleted = "completed"
+	TransferReversed  = "reversed"
+)
+
 type Transfer struct {
 	ID                 uuid.UUID
 	SenderID           uuid.UUID
@@ -28,5 +33,10 @@ type Transfer struct {
 	IdempotencyKey     string
 	BodyHash           string
 	SenderBalanceAfter int64
+	Status             string
 	CreatedAt          time.Time
+
+	// Set only once Status is reversed.
+	ReversedAt                 *time.Time
+	SenderBalanceAfterReversal *int64
 }

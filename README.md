@@ -22,9 +22,10 @@ Or locally: `DATABASE_URL=... JWT_SECRET=... go run ./cmd/server`
 | `POST /auth/signup` `{username, password}` | – | create user → `{token, user_id}` |
 | `POST /auth/login` `{username, password}` | – | → `{token}` |
 | `POST /accounts` | Bearer | get-or-create my wallet → `{user_id, balance_paise}` |
-| `GET /accounts/me` | Bearer | → `{balance_paise}` |
+| `GET /accounts/me` | Bearer | → `{balance_paise, available_paise}` |
 | `POST /transfers` `{to_user, amount_paise, idempotency_key}` | Bearer | move funds → `{transfer_id, new_balance}` |
-| `GET /transfers/{id}` | Bearer | details, participants only |
+| `GET /transfers/{id}` | Bearer | details incl. `status`, participants only |
+| `POST /transfers/{id}/claim` | Bearer | sender-only: reverse the transfer within 24 h, exactly once |
 | `GET /healthz` / `GET /readyz` | – | liveness / readiness (incl. DB ping) |
 | `GET /metrics` / `GET /logs` | – | Prometheus metrics / recent structured logs |
 
@@ -45,6 +46,18 @@ Transfer responses: `201` applied · `200` idempotent replay ·
 `400` validation/self-transfer · `404` unknown recipient · `409` same key
 different body · `422` insufficient funds · `503` database unavailable
 (fail closed — safe to retry).
+
+## Claim-back (24 h reversal)
+
+The sender can reverse a transfer for up to `CLAIM_WINDOW` (default 24 h)
+after sending, and the reversal is **guaranteed** to succeed **exactly
+once**. To make the guarantee possible, money you *receive* is credited
+instantly but stays **on hold** — part of `balance_paise` but not
+`available_paise` — until its claim window passes; spends are checked
+against the available balance. Holds expire lazily on the database clock
+(no background job). Claim responses: `200` reversed (retries replay with
+`Idempotent-Replay: true`) · `404` not the sender / unknown id · `409`
+window expired.
 
 ## The correctness gate
 
@@ -79,10 +92,10 @@ random burst, replay-after-balance-drop, and the full edge-case matrix.
 - **Logs**: structured JSON on stdout with a `request_id` per request;
   the last 1000 events are publicly viewable at `GET /logs`.
 - **Metrics**: `GET /metrics` — request counts, latency histogram (p99),
-  transfers applied/rejected by reason, idempotent replays, get-or-create
-  races lost, auth failures.
+  transfers applied/rejected by reason, idempotent replays, claims
+  applied/rejected/replayed, get-or-create races lost, auth failures.
 - **Config** (env only): `DATABASE_URL`, `JWT_SECRET`, `PORT`,
-  `INITIAL_BALANCE_PAISE`.
+  `INITIAL_BALANCE_PAISE`, `CLAIM_WINDOW` (Go duration, default `24h`).
 
 Deployed at **https://wallet-service-irfj.onrender.com** — Render free tier
 (Docker runtime, Ohio, co-located with the database) + Neon free Postgres.
